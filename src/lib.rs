@@ -31,6 +31,7 @@ use std::time::Duration;
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
 pub use kafka::{Client, Event, Record, Session, TopicMetadata};
 use transport::error::{Result, TransportError, protocol_error};
+use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
@@ -237,23 +238,15 @@ impl RedpandaTransport {
     }
 }
 
-/// A bound listener waiting for its one producer and its one record — on
-/// the wire it is Kafka, so the session is that crate's. It holds the
-/// timeout rather than the transport: the transport carries a cursor under
-/// a lock, and a far end has no offset to keep.
-struct Listening {
-    timeout: Option<Duration>,
-    listener: TcpListener,
-    address: String,
-}
+/// What the far end does with its one producer and its one record — on the
+/// wire it is Kafka, so the session is that crate's. It holds the timeout
+/// rather than the transport: the transport carries a cursor under a lock,
+/// and a far end has no offset to keep.
+struct Producing(Option<Duration>);
 
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        let mut session = Session::accept(&self.listener, self.timeout)?;
+impl Accepting for Producing {
+    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+        let mut session = Session::accept(listener, self.0)?;
         session
             .next_produce()?
             .ok_or_else(|| protocol_error("the client closed without producing"))
@@ -263,11 +256,11 @@ impl FarEnd for Listening {
 impl Loopback for RedpandaTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening {
-            timeout: self.timeout,
+        Ok(Box::new(Listening::new(
+            Producing(self.timeout),
             listener,
             address,
-        }))
+        )))
     }
 
     /// A fresh producer to `address`, one record on this transport's topic,
@@ -282,6 +275,7 @@ impl Loopback for RedpandaTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transport::payload::{edge_payloads, sized_payloads};
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
@@ -385,35 +379,9 @@ mod tests {
     #[test]
     fn the_loopback_returns_the_edge_payloads_whole() {
         let loopback = RedpandaTransport::loopback();
-        for (name, payload) in edge_payloads() {
+        for (name, payload) in [edge_payloads(), sized_payloads()].concat() {
             let arrived = loopback.round(&payload).expect(name);
             assert!(arrived.bytes == payload, "{name} came back changed");
         }
-    }
-
-    /// The Playground's edge payloads, written here so the crate does not
-    /// depend on it: the shapes a framing fault changes.
-    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-            ("mtu minus one", patterned(1_471)),
-            ("mtu", patterned(1_472)),
-            ("mtu plus one", patterned(1_473)),
-            ("udp maximum", patterned(65_507)),
-            ("sixteen bits plus one", patterned(65_537)),
-            ("a mebibyte", patterned(1 << 20)),
-        ]
-    }
-
-    /// `len` bytes a truncation, a reorder or a duplicate would change.
-    fn patterned(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|at| u8::try_from((at * 31 + at / 251) % 256).unwrap_or(0))
-            .collect()
     }
 }
