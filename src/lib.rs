@@ -30,8 +30,8 @@ use std::time::Duration;
 
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
 pub use kafka::{Client, Event, Record, Session, TopicMetadata};
-use transport::error::{Result, TransportError, protocol_error};
-use transport::listening::{Accepting, Listening};
+use transport::error::{Result, TransportError};
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
@@ -238,28 +238,13 @@ impl RedpandaTransport {
     }
 }
 
-/// What the far end does with its one producer and its one record — on the
-/// wire it is Kafka, so the session is that crate's. It holds the timeout
-/// rather than the transport: the transport carries a cursor under a lock,
-/// and a far end has no offset to keep.
-struct Producing(Option<Duration>);
-
-impl Accepting for Producing {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        let mut session = Session::accept(listener, self.0)?;
-        session
-            .next_produce()?
-            .ok_or_else(|| protocol_error("the client closed without producing"))
-    }
-}
-
 impl Loopback for RedpandaTransport {
+    /// On the wire it is Kafka, so the far end is that crate's: one
+    /// producer, one record.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
         Ok(Box::new(Listening::new(
-            Producing(self.timeout),
-            listener,
-            address,
+            kafka::producing(self.timeout),
+            self.bind()?,
         )))
     }
 

@@ -17,9 +17,11 @@ path = "src/lib.rs"
 # A Technology depends on its parent Capability, never the reverse
 # (repository-model.md). Redpanda speaks Kafka on the wire, so the client and
 # the far end come from the kafka technology; the Admin API is JSON over
-# HTTP, and serde_json reads it.
+# HTTP, asked through the estate's minimal HTTP/1.1 client, and serde_json
+# reads it.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
 kafka = { package = "xmip-core-transport-kafka", git = "https://github.com/IlleNilsson/xmip-core-transport-kafka", branch = "main" }
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
 serde_json = "1"
 
 [dev-dependencies]

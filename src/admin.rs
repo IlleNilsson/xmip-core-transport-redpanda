@@ -1,6 +1,7 @@
 //! The Redpanda Admin API, on port 9644: what a Redpanda broker says about
 //! itself that a Kafka broker does not. JSON over HTTP/1.1, one request per
-//! connection, `Content-Length` and nothing cleverer.
+//! connection: the client side is the estate's minimal HTTP/1.1 client,
+//! `net::http`, and the far end reads `Content-Length` and nothing cleverer.
 //!
 //! Three calls, the ones a Location consults before taking work: the
 //! brokers and whether each is alive or draining, the cluster
@@ -12,6 +13,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
+use net::NetError;
+use net::http::{self, Request};
 use serde_json::{Value, json};
 use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::socket;
@@ -120,16 +123,10 @@ impl Admin {
     }
 
     fn call(&self, method: &str, path: &str) -> Result<Value> {
-        let mut stream = socket::connect_tcp(&self.address, self.timeout)?;
-        let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\n\
-             Content-Length: 0\r\nConnection: close\r\n\r\n",
-            self.address
-        );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|e| classify("writing the request", &e))?;
-        let (code, body) = read_response(&mut std::io::BufReader::new(stream))?;
+        let stream = socket::connect_tcp(&self.address, self.timeout)?;
+        let request = Request::new(method, path).header("Accept", "application/json");
+        let answer = http::exchange(stream, &self.address, &request).map_err(failed)?;
+        let (code, body) = (answer.status, answer.body);
         if !(200..300).contains(&code) {
             let message = format!("the Admin API answered {method} {path} with {code}");
             return Err(if code >= 500 {
@@ -146,16 +143,16 @@ impl Admin {
     }
 }
 
-/// The status code and the body behind its `Content-Length`.
-fn read_response(reader: &mut impl std::io::BufRead) -> Result<(u16, Vec<u8>)> {
-    let lines = read_head(reader)?;
-    let status = lines
-        .first()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| protocol_error("a status line Xmip cannot read"))?;
-    let body = read_body(reader, &lines)?;
-    Ok((status, body))
+/// The client's failure as the transport judges it: the connection's
+/// retryable as its kind says, an answer that is not HTTP never.
+fn failed(error: NetError) -> TransportError {
+    match error.io {
+        Some(kind) => classify(
+            "asking the Admin API",
+            &std::io::Error::new(kind, error.message),
+        ),
+        None => protocol_error(error.message),
+    }
 }
 
 fn read_body(reader: &mut impl Read, lines: &[String]) -> Result<Vec<u8>> {
