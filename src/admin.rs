@@ -1,7 +1,7 @@
 //! The Redpanda Admin API, on port 9644: what a Redpanda broker says about
 //! itself that a Kafka broker does not. JSON over HTTP/1.1, one request per
-//! connection: the client side is the estate's minimal HTTP/1.1 client,
-//! `net::http`, and the far end reads `Content-Length` and nothing cleverer.
+//! connection, both sides written and read by the estate's one HTTP/1.1
+//! codec, `net::http`.
 //!
 //! Three calls, the ones a Location consults before taking work: the
 //! brokers and whether each is alive or draining, the cluster
@@ -9,16 +9,13 @@
 //! The far end, [`AdminSession`], answers those three from memory so a test
 //! and the playground can stand in for a broker.
 
-use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-use net::NetError;
-use net::http::{self, Request};
+use net::http::{self, Request, Response};
 use serde_json::{Value, json};
-use transport::error::{Result, TransportError, classify, protocol_error};
+use transport::error::{Result, TransportError, protocol_error};
 use transport::socket;
-use transport::wire::{header, read_head};
 
 /// One broker as `GET /v1/brokers` describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,8 +121,10 @@ impl Admin {
 
     fn call(&self, method: &str, path: &str) -> Result<Value> {
         let stream = socket::connect_tcp(&self.address, self.timeout)?;
-        let request = Request::new(method, path).header("Accept", "application/json");
-        let answer = http::exchange(stream, &self.address, &request).map_err(failed)?;
+        let request = Request::new(method, path)
+            .header("Host", &self.address)
+            .header("Accept", "application/json");
+        let answer = http::exchange(stream, &request)?;
         let (code, body) = (answer.status, answer.body);
         if !(200..300).contains(&code) {
             let message = format!("the Admin API answered {method} {path} with {code}");
@@ -141,36 +140,6 @@ impl Admin {
         serde_json::from_slice(&body)
             .map_err(|e| protocol_error(format!("an answer that is not JSON: {e}")))
     }
-}
-
-/// The client's failure as the transport judges it: the connection's
-/// retryable as its kind says, an answer that is not HTTP never.
-fn failed(error: NetError) -> TransportError {
-    match error.io {
-        Some(kind) => classify(
-            "asking the Admin API",
-            &std::io::Error::new(kind, error.message),
-        ),
-        None => protocol_error(error.message),
-    }
-}
-
-fn read_body(reader: &mut impl Read, lines: &[String]) -> Result<Vec<u8>> {
-    let length: usize = header(lines, "content-length")
-        .map(|l| {
-            l.parse()
-                .map_err(|_| protocol_error("a length that is not a number"))
-        })
-        .transpose()?
-        .unwrap_or(0);
-    if length > transport::wire::MAX_BODY {
-        return Err(protocol_error("a body over what Xmip will read"));
-    }
-    let mut body = vec![0u8; length];
-    reader
-        .read_exact(&mut body)
-        .map_err(|e| classify("reading the body", &e))?;
-    Ok(body)
 }
 
 /// What a request to [`AdminSession`] asked, as it reports it.
@@ -234,32 +203,17 @@ impl AdminSession {
     pub fn serve_one(&mut self, listener: &TcpListener) -> Result<AdminRequest> {
         let (stream, _) = socket::accept_tcp(listener, self.timeout)?;
         let (mut reader, mut writer) = socket::split(stream)?;
-        let lines = read_head(&mut reader)?;
-        let mut words = lines
-            .first()
-            .map(|l| l.split_whitespace())
-            .into_iter()
-            .flatten();
-        let (Some(method), Some(path)) = (words.next(), words.next()) else {
-            return Err(protocol_error("a request line that is not HTTP"));
-        };
+        let asked = http::read_request(&mut reader)?
+            .ok_or_else(|| protocol_error("a connection that sent no request"))?;
         let request = AdminRequest {
-            method: method.to_string(),
-            path: path.to_string(),
+            method: asked.method,
+            path: asked.path,
         };
-        read_body(&mut reader, &lines)?;
         let (code, body) = self.answer(&request);
-        let body = body.to_string();
-        let head = format!(
-            "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            if code == 200 { "OK" } else { "Not Found" },
-            body.len()
-        );
-        writer
-            .write_all(head.as_bytes())
-            .and_then(|()| writer.write_all(body.as_bytes()))
-            .map_err(|e| classify("writing the answer", &e))?;
+        let answer = Response::new(code)
+            .header("Content-Type", "application/json")
+            .body(body.to_string().as_bytes());
+        http::write_response(&mut writer, &answer)?;
         Ok(request)
     }
 
@@ -318,6 +272,7 @@ impl AdminSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
