@@ -34,18 +34,21 @@ use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Pool, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 pub struct RedpandaTransport {
     broker: String,
     topic: String,
     partition: i32,
-    admin: Option<String>,
+    admin: Option<Admin>,
     node: i64,
     client: String,
     cursor: Mutex<i64>,
     timeout: Option<Duration>,
+    /// The connections a send produces on, connected once per broker and
+    /// kept.
+    producers: Pool<Client>,
 }
 
 impl RedpandaTransport {
@@ -62,14 +65,18 @@ impl RedpandaTransport {
             client: "xmip".to_string(),
             cursor: Mutex::new(0),
             timeout: None,
+            producers: Pool::new(),
         }
     }
 
-    /// Consult the Admin API at `address`, `host:9644`, before receiving.
-    #[must_use]
-    pub fn with_admin(mut self, address: impl Into<String>) -> Self {
-        self.admin = Some(address.into());
-        self
+    /// Consult the Admin API at `address`, `host:9644`, before receiving,
+    /// on connections kept to it. The timeout is the one set before.
+    ///
+    /// # Errors
+    /// Where `address` is not a host and port.
+    pub fn with_admin(mut self, address: &str) -> Result<Self> {
+        self.admin = Some(Admin::new(address, self.timeout)?);
+        Ok(self)
     }
 
     /// The node the broker is, as the Admin API numbers it; 0 until said.
@@ -149,10 +156,10 @@ impl RedpandaTransport {
     /// Retryable where the node is draining or not alive — it will be back;
     /// permanent where the API knows no such node.
     pub fn check_ready(&self) -> Result<()> {
-        let Some(address) = &self.admin else {
+        let Some(admin) = &self.admin else {
             return Ok(());
         };
-        let brokers = Admin::new(address, self.timeout).brokers()?;
+        let brokers = admin.brokers()?;
         let broker = brokers
             .iter()
             .find(|b| b.node_id == self.node)
@@ -220,12 +227,19 @@ impl Transport for RedpandaTransport {
         Ok(arrived)
     }
 
+    /// Produce on the connection kept for the broker, connected on the
+    /// first send to it, acknowledged by the leader.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (broker, topic) = self.resolve(target);
-        let mut client = Client::connect(broker, &self.client, self.timeout)?;
-        client
-            .produce(topic, self.partition, None, bytes)
-            .map(|_| ())
+        self.producers.exchange(
+            broker,
+            || Client::connect(broker, &self.client, self.timeout),
+            |client| {
+                client
+                    .produce(topic, self.partition, None, bytes)
+                    .map(|_| ())
+            },
+        )
     }
 }
 
@@ -304,14 +318,15 @@ impl Configured for RedpandaTransport {
         if let Some(offset) = settings.optional_integer("offset") {
             transport = transport.from_offset(offset);
         }
-        if let Some(admin) = settings.optional_text("admin") {
-            transport = transport.with_admin(admin);
-        }
         if let Some(node) = settings.optional_integer("node") {
             transport = transport.on_node(node);
         }
         if let Some(timeout) = settings.optional_duration("timeout") {
             transport = transport.timing_out_after(timeout);
+        }
+        // After the timeout, which the Admin API is asked within.
+        if let Some(admin) = settings.optional_text("admin") {
+            transport = transport.with_admin(admin)?;
         }
         Ok(transport)
     }
@@ -372,7 +387,10 @@ mod tests {
         assert_eq!(built.topic, "orders");
         assert_eq!(built.partition, 3);
         assert_eq!(built.cursor(), 41);
-        assert_eq!(built.admin.as_deref(), Some("broker:9644"));
+        assert_eq!(
+            built.admin.as_ref().map(Admin::address).as_deref(),
+            Some("broker:9644")
+        );
         assert_eq!(built.node, 2);
         assert_eq!(built.timeout, Some(secs(2)));
         let Err(refused) = RedpandaTransport::open("broker:9092", Applies::Send, &[]) else {
@@ -394,12 +412,14 @@ mod tests {
             let arrived = near.receive()?;
             Ok::<_, TransportError>((arrived, near.cursor()))
         });
+        // One broker, so one connection for both sends; the receive opens
+        // its own.
+        let mut session = far_end.accept_one(&listener).expect("accepting");
         for expected in [&b"produced"[..], b"again"] {
-            let mut session = far_end.accept_one(&listener).expect("accepting");
             let one = session.next_produce().expect("produce").expect("one");
             assert_eq!(one.bytes, expected);
-            assert!(session.next_produce().expect("closed").is_none());
         }
+        drop(session);
         let mut session = far_end
             .accept_one(&listener)
             .expect("third")
@@ -422,14 +442,14 @@ mod tests {
         let (listener, address) = far_end.bind().expect("binding");
         let near = std::thread::spawn(move || {
             let near = RedpandaTransport::new(address, "orders")
-                .with_admin(admin_address.clone())
-                .timing_out_after(secs(2));
+                .timing_out_after(secs(2))
+                .with_admin(&admin_address)?;
             let refused = near.receive().expect_err("draining");
             let arrived = near.receive()?;
             let unknown = RedpandaTransport::new("127.0.0.1:1", "orders")
-                .with_admin(admin_address)
                 .on_node(7)
                 .timing_out_after(secs(2))
+                .with_admin(&admin_address)?
                 .check_ready()
                 .expect_err("no node 7");
             Ok::<_, TransportError>((refused, arrived, unknown))

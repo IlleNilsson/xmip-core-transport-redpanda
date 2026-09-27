@@ -5,6 +5,8 @@ Admin API — brokers, cluster configuration, maintenance — consulted before a
 Location takes work. A technology of
 [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
+A Send Location produces on a connection kept per broker (`transport::Pool`). The Admin API is asked on the http technology's kept connections (`endpoint::Connections`) and its status judged by that technology's one rule (`status::judge`); until 2026-09-27 it opened a connection a call and carried a 5xx rule of its own.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

@@ -1,7 +1,8 @@
 //! The Redpanda Admin API, on port 9644: what a Redpanda broker says about
-//! itself that a Kafka broker does not. JSON over HTTP/1.1, one request per
-//! connection, both sides written and read by the estate's one HTTP/1.1
-//! codec, `net::http`.
+//! itself that a Kafka broker does not. JSON over HTTP/1.1, asked on the
+//! http technology's kept connections ([`Connections`]) and judged by its
+//! status rule (`http::status`); the far end writes and reads with the
+//! estate's one HTTP/1.1 codec, `net::http`.
 //!
 //! Three calls, the ones a Location consults before taking work: the
 //! brokers and whether each is alive or draining, the cluster
@@ -12,9 +13,11 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use net::http::{self, Request, Response};
+use http::endpoint::{Connections, Offer};
+use net::Endpoint;
+use net::http::{Request, Response};
 use serde_json::{Value, json};
-use transport::error::{Result, TransportError, protocol_error};
+use transport::error::{Result, protocol_error};
 use transport::socket;
 
 /// One broker as `GET /v1/brokers` describes it.
@@ -40,20 +43,31 @@ pub struct ConfigStatus {
     pub invalid: Vec<String>,
 }
 
-/// The client's side: one request, one answer, over a fresh connection.
+/// The client's side: the API's address read once, and the connections
+/// kept to it between calls.
 pub struct Admin {
-    address: String,
+    endpoint: Endpoint,
     timeout: Option<Duration>,
+    connections: Connections,
 }
 
 impl Admin {
     /// Speak to the Admin API at `address`, `host:9644`.
-    #[must_use]
-    pub fn new(address: impl Into<String>, timeout: Option<Duration>) -> Self {
-        Self {
-            address: address.into(),
+    ///
+    /// # Errors
+    /// Where `address` is not a host and port.
+    pub fn new(address: &str, timeout: Option<Duration>) -> Result<Self> {
+        Ok(Self {
+            endpoint: Endpoint::parse(&format!("http://{address}"))?,
             timeout,
-        }
+            connections: Connections::new(),
+        })
+    }
+
+    /// The API's address, `host:9644`.
+    #[must_use]
+    pub fn address(&self) -> String {
+        self.endpoint.address()
     }
 
     /// Every broker in the cluster.
@@ -120,24 +134,22 @@ impl Admin {
     }
 
     fn call(&self, method: &str, path: &str) -> Result<Value> {
-        let stream = socket::connect_tcp(&self.address, self.timeout)?;
         let request = Request::new(method, path)
-            .header("Host", &self.address)
+            .header("Host", &self.endpoint.address())
             .header("Accept", "application/json");
-        let answer = http::exchange(stream, &request)?;
-        let (code, body) = (answer.status, answer.body);
-        if !(200..300).contains(&code) {
-            let message = format!("the Admin API answered {method} {path} with {code}");
-            return Err(if code >= 500 {
-                TransportError::retryable(message)
-            } else {
-                TransportError::permanent(message)
-            });
-        }
-        if body.is_empty() {
+        let answer =
+            self.connections
+                .exchange(&self.endpoint, self.timeout, Offer::Http11, &request)?;
+        let answer = http::status::judge(
+            "the Admin API",
+            answer,
+            |_| format!("to {method} {path}"),
+            |_| false,
+        )?;
+        if answer.body.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_slice(&body)
+        serde_json::from_slice(&answer.body)
             .map_err(|e| protocol_error(format!("an answer that is not JSON: {e}")))
     }
 }
@@ -203,17 +215,19 @@ impl AdminSession {
     pub fn serve_one(&mut self, listener: &TcpListener) -> Result<AdminRequest> {
         let (stream, _) = socket::accept_tcp(listener, self.timeout)?;
         let (mut reader, mut writer) = socket::split(stream)?;
-        let asked = http::read_request(&mut reader)?
+        let asked = net::http::read_request(&mut reader)?
             .ok_or_else(|| protocol_error("a connection that sent no request"))?;
         let request = AdminRequest {
             method: asked.method,
             path: asked.path,
         };
         let (code, body) = self.answer(&request);
+        // One request a connection, and the client told so.
         let answer = Response::new(code)
             .header("Content-Type", "application/json")
+            .header("Connection", "close")
             .body(body.to_string().as_bytes());
-        http::write_response(&mut writer, &answer)?;
+        net::http::write_response(&mut writer, &answer)?;
         Ok(request)
     }
 
@@ -273,6 +287,7 @@ impl AdminSession {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use transport::TransportError;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
@@ -282,7 +297,7 @@ mod tests {
     fn the_three_calls_are_answered_and_maintenance_sticks() {
         let (listener, address) = AdminSession::bind("127.0.0.1:0").expect("bind");
         let client = std::thread::spawn(move || {
-            let admin = Admin::new(address, Some(secs(2)));
+            let admin = Admin::new(&address, Some(secs(2)))?;
             let before = admin.brokers()?;
             admin.maintenance(0, true)?;
             let during = admin.brokers()?;
@@ -326,7 +341,7 @@ mod tests {
                 stream.write_all(answer).expect("write");
             }
         });
-        let admin = Admin::new(address, Some(secs(2)));
+        let admin = Admin::new(&address, Some(secs(2))).expect("an address");
         assert!(!admin.brokers().expect_err("not json").retryable);
         assert!(admin.brokers().expect_err("503").retryable);
         assert!(!admin.brokers().expect_err("not http").retryable);
