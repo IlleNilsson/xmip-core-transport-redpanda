@@ -34,7 +34,8 @@ use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 pub struct RedpandaTransport {
     broker: String,
@@ -228,6 +229,94 @@ impl Transport for RedpandaTransport {
     }
 }
 
+impl Configured for RedpandaTransport {
+    /// The address is the broker, `host:9092`: where a Location connects
+    /// and asks for the partition's leader.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "topic",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The topic a Receive Location fetches and a Send Location produces to \
+                          when a target names no topic.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "partition",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 2_147_483_647,
+                },
+                presence: Presence::Optional,
+                meaning: "The partition read and written; partition 0 when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "offset",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: i64::MAX,
+                },
+                presence: Presence::Optional,
+                meaning: "The offset a Receive Location starts fetching from; the partition's \
+                          beginning when left out.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "admin",
+                kind: Kind::Address,
+                presence: Presence::Optional,
+                meaning: "The Admin API, `host:9644`, consulted before a receive takes work; \
+                          not consulted when left out.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "node",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: i64::MAX,
+                },
+                presence: Presence::Optional,
+                meaning: "The node the broker is, as the Admin API numbers it; node 0 when left \
+                          out.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a broker that stops mid-message is waited on; unbounded when \
+                          left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let mut transport = Self::new(address, settings.text("topic"));
+        if let Some(partition) = settings.optional_integer("partition") {
+            let partition = i32::try_from(partition)
+                .map_err(|_| TransportError::permanent("the partition is out of range"))?;
+            transport = transport.on_partition(partition);
+        }
+        if let Some(offset) = settings.optional_integer("offset") {
+            transport = transport.from_offset(offset);
+        }
+        if let Some(admin) = settings.optional_text("admin") {
+            transport = transport.with_admin(admin);
+        }
+        if let Some(node) = settings.optional_integer("node") {
+            transport = transport.on_node(node);
+        }
+        if let Some(timeout) = settings.optional_duration("timeout") {
+            transport = transport.timing_out_after(timeout);
+        }
+        Ok(transport)
+    }
+}
+
 impl RedpandaTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, one topic called `probe`. The Admin API is not consulted; a
@@ -264,6 +353,32 @@ mod tests {
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
+    }
+
+    #[test]
+    fn redpanda_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert_eq!(RedpandaTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [
+            ("topic".to_string(), Given::Text("orders".to_string())),
+            ("partition".to_string(), Given::Integer(3)),
+            ("offset".to_string(), Given::Integer(41)),
+            ("admin".to_string(), Given::Text("broker:9644".to_string())),
+            ("node".to_string(), Given::Integer(2)),
+            ("timeout".to_string(), Given::Text("2s".to_string())),
+        ];
+        let built =
+            RedpandaTransport::open("broker:9092", Applies::Receive, &given).expect("configured");
+        assert_eq!(built.topic, "orders");
+        assert_eq!(built.partition, 3);
+        assert_eq!(built.cursor(), 41);
+        assert_eq!(built.admin.as_deref(), Some("broker:9644"));
+        assert_eq!(built.node, 2);
+        assert_eq!(built.timeout, Some(secs(2)));
+        let Err(refused) = RedpandaTransport::open("broker:9092", Applies::Send, &[]) else {
+            panic!("the topic is required");
+        };
+        assert!(refused.message.contains("\"topic\""), "{refused}");
     }
 
     #[test]
