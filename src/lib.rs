@@ -30,6 +30,7 @@ use std::time::Duration;
 
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
 pub use kafka::{Client, Event, Record, Session, TopicMetadata};
+use net::Target;
 use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -49,6 +50,9 @@ pub struct RedpandaTransport {
     /// The connections a send produces on, connected once per broker and
     /// kept.
     producers: Pool<Client>,
+    /// The connection a receive fetches on, to the partition's leader:
+    /// connected on the first receive and kept.
+    fetchers: Pool<Client>,
 }
 
 impl RedpandaTransport {
@@ -66,6 +70,7 @@ impl RedpandaTransport {
             cursor: Mutex::new(0),
             timeout: None,
             producers: Pool::new(),
+            fetchers: Pool::new(),
         }
     }
 
@@ -74,14 +79,14 @@ impl RedpandaTransport {
     ///
     /// # Errors
     /// Where `address` is not a host and port.
-    pub fn with_admin(mut self, address: &str) -> Result<Self> {
+    fn with_admin(mut self, address: &str) -> Result<Self> {
         self.admin = Some(Admin::new(address, self.timeout)?);
         Ok(self)
     }
 
     /// The node the broker is, as the Admin API numbers it; 0 until said.
     #[must_use]
-    pub const fn on_node(mut self, node: i64) -> Self {
+    const fn on_node(mut self, node: i64) -> Self {
         self.node = node;
         self
     }
@@ -125,12 +130,7 @@ impl RedpandaTransport {
     /// # Errors
     /// Where no broker could be reached or the topic has no leader.
     pub fn connect(&self) -> Result<Client> {
-        let mut client = Client::connect(&self.broker, &self.client, self.timeout)?;
-        let metadata = client.metadata(&self.topic)?;
-        if metadata.leader.is_empty() || metadata.leader == self.broker {
-            return Ok(client);
-        }
-        Client::connect(&metadata.leader, &self.client, self.timeout)
+        Client::to_leader(&self.broker, &self.topic, &self.client, self.timeout)
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -155,7 +155,7 @@ impl RedpandaTransport {
     /// # Errors
     /// Retryable where the node is draining or not alive — it will be back;
     /// permanent where the API knows no such node.
-    pub fn check_ready(&self) -> Result<()> {
+    fn check_ready(&self) -> Result<()> {
         let Some(admin) = &self.admin else {
             return Ok(());
         };
@@ -184,13 +184,10 @@ impl RedpandaTransport {
     /// Where a target names the broker and topic itself, or is a topic
     /// alone on this transport's broker.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match socket::target("redpanda", target) {
-            Some((peer, "")) => (peer, &self.topic),
-            Some(pair) => pair,
-            None => match target.split_once('/') {
-                Some((peer, topic)) if peer.contains(':') => (peer, topic),
-                _ => (&self.broker, target),
-            },
+        match Target::naming_server(&["redpanda"], target) {
+            Some(named) if named.path().is_empty() => (named.authority(), &self.topic),
+            Some(named) => (named.authority(), named.path()),
+            None => (&self.broker, target),
         }
     }
 }
@@ -205,11 +202,16 @@ impl Transport for RedpandaTransport {
     }
 
     /// The records from the cursor on, the cursor moved past the last — once
-    /// the Admin API, where consulted, says the node is taking work.
+    /// the Admin API, where consulted, says the node is taking work —
+    /// fetched on the connection the first receive opened to the leader
+    /// and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
         self.check_ready()?;
-        let mut client = self.connect()?;
-        let records = client.fetch(&self.topic, self.partition, self.cursor())?;
+        let records = self.fetchers.exchange(
+            self.broker.as_str(),
+            || self.connect(),
+            |client| client.fetch(&self.topic, self.partition, self.cursor()),
+        )?;
         let mut arrived = Vec::with_capacity(records.len());
         for record in records {
             arrived.push(Arrived::new(
@@ -446,6 +448,8 @@ mod tests {
                 .with_admin(&admin_address)?;
             let refused = near.receive().expect_err("draining");
             let arrived = near.receive()?;
+            // Its kept connection closes with it, which ends the serving.
+            drop(near);
             let unknown = RedpandaTransport::new("127.0.0.1:1", "orders")
                 .on_node(7)
                 .timing_out_after(secs(2))
@@ -484,6 +488,53 @@ mod tests {
         assert_eq!(arrived.len(), 1);
         assert_eq!(arrived[0].bytes, b"one");
         assert!(!unknown.retryable);
+    }
+
+    #[test]
+    fn a_thousand_receives_connect_once_and_a_connection_the_broker_closed_is_replaced() {
+        const RECEIVES: usize = 1000;
+        let far_end = RedpandaTransport::new("127.0.0.1:0", "orders").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = RedpandaTransport::new(address, "orders").timing_out_after(secs(5));
+        let fetched = |session: &mut Session, from: i64| {
+            let event = session.next_event().expect("fetch");
+            assert!(
+                matches!(event, Some(Event::Fetched { offset, .. }) if offset == from),
+                "{event:?}"
+            );
+        };
+        std::thread::scope(|scope| {
+            let receiver = scope.spawn(|| {
+                let began = std::time::Instant::now();
+                let mut arrived = 0;
+                for _ in 0..RECEIVES {
+                    arrived += near.receive()?.len();
+                }
+                let took = began.elapsed();
+                // Generous for a debug build under load: a millisecond a fetch.
+                assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
+                arrived += near.receive()?.len();
+                Ok::<_, transport::TransportError>(arrived)
+            });
+            // One connection for every fetch: one session accepted.
+            let mut session = far_end
+                .accept_one(&listener)
+                .expect("accepting")
+                .with_records("orders", &[b"zero"]);
+            fetched(&mut session, 0);
+            for _ in 1..RECEIVES {
+                fetched(&mut session, 1);
+            }
+            drop(session);
+            let mut again = far_end
+                .accept_one(&listener)
+                .expect("a new connection")
+                .with_records("orders", &[b"zero", b"one"]);
+            fetched(&mut again, 1);
+            assert_eq!(receiver.join().expect("thread").expect("fetched"), 2);
+        });
+        assert_eq!(near.cursor(), 2);
+        assert_eq!(near.fetchers.opened(), 2);
     }
 
     #[test]
