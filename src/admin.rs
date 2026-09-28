@@ -99,7 +99,8 @@ impl Admin {
     ///
     /// # Errors
     /// Where the API could not be reached or answered something else.
-    pub fn cluster_config_status(&self) -> Result<Vec<ConfigStatus>> {
+    #[cfg(test)]
+    fn cluster_config_status(&self) -> Result<Vec<ConfigStatus>> {
         let answer = self.call("GET", "/v1/cluster_config/status")?;
         let nodes = answer
             .as_array()
