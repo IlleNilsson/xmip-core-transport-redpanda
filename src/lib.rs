@@ -25,12 +25,12 @@
 pub mod admin;
 
 use std::net::TcpListener;
-use std::sync::Mutex;
 use std::time::Duration;
 
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
 pub use kafka::{Client, Event, Record, Session, TopicMetadata};
 use net::Target;
+use transport::contiguous::Contiguous;
 use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -45,7 +45,9 @@ pub struct RedpandaTransport {
     admin: Option<Admin>,
     node: i64,
     client: String,
-    cursor: Mutex<i64>,
+    /// The offset the next receive reads from, which a record's
+    /// acknowledgement moves.
+    cursor: Contiguous<i64>,
     timeout: Option<Duration>,
     /// The connections a send produces on, connected once per broker and
     /// kept.
@@ -67,7 +69,7 @@ impl RedpandaTransport {
             admin: None,
             node: 0,
             client: "xmip".to_string(),
-            cursor: Mutex::new(0),
+            cursor: Contiguous::new(0),
             timeout: None,
             producers: Pool::new(),
             fetchers: Pool::new(),
@@ -101,10 +103,7 @@ impl RedpandaTransport {
     /// Start reading from this offset rather than the beginning.
     #[must_use]
     pub fn from_offset(self, offset: i64) -> Self {
-        *self
-            .cursor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = offset;
+        self.cursor.set(offset);
         self
     }
 
@@ -118,10 +117,7 @@ impl RedpandaTransport {
     /// The offset the next receive reads from.
     #[must_use]
     pub fn cursor(&self) -> i64 {
-        *self
-            .cursor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.cursor.at()
     }
 
     /// Connect to the partition's leader, asking the configured broker who
@@ -201,10 +197,18 @@ impl Transport for RedpandaTransport {
         Directions::BOTH
     }
 
-    /// The records from the cursor on, the cursor moved past the last — once
-    /// the Admin API, where consulted, says the node is taking work —
-    /// fetched on the connection the first receive opened to the leader
-    /// and kept.
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered("a cursor moves only contiguously")
+    }
+
+    /// The records from the cursor on — once the Admin API, where
+    /// consulted, says the node is taking work — fetched on the connection
+    /// the first receive opened to the leader and kept. Nothing moves the
+    /// cursor here: a record's acknowledgement does
+    /// ([`transport::contiguous::Contiguous`]) — `Accepted` past that record
+    /// where the cursor stands at it, `Refused` the same way, as a log has no
+    /// place to reject a record into and a refused one is not read again,
+    /// `Failed` not at all, so the failed record is fetched again.
     fn receive(&self) -> Result<Vec<Arrived>> {
         self.check_ready()?;
         let records = self.fetchers.exchange(
@@ -214,17 +218,15 @@ impl Transport for RedpandaTransport {
         )?;
         let mut arrived = Vec::with_capacity(records.len());
         for record in records {
-            arrived.push(Arrived::new(
+            let offset = record.offset;
+            arrived.push(Arrived::whole(
                 format!(
-                    "redpanda://{}/{}/{}?offset={}",
-                    self.broker, self.topic, self.partition, record.offset
+                    "redpanda://{}/{}/{}?offset={offset}",
+                    self.broker, self.topic, self.partition
                 ),
                 record.value.unwrap_or_default(),
+                self.cursor.advancing(offset, offset + 1),
             ));
-            *self
-                .cursor
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = record.offset + 1;
         }
         Ok(arrived)
     }
@@ -366,6 +368,8 @@ impl Loopback for RedpandaTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transport::Refusal;
+    use transport::arrived::next_arrival;
     use transport::payload::{edge_payloads, sized_payloads};
 
     fn secs(n: u64) -> Duration {
@@ -411,8 +415,17 @@ mod tests {
                 .timing_out_after(secs(2));
             near.send(&format!("redpanda://{address}/orders"), b"produced")?;
             near.send(&format!("{address}/orders"), b"again")?;
-            let arrived = near.receive()?;
-            Ok::<_, TransportError>((arrived, near.cursor()))
+            let mut arrived = near.receive()?.into_iter();
+            let one = arrived.next().expect("offset 1").taken()?;
+            arrived
+                .next()
+                .expect("offset 2")
+                .refused(Refusal::Forbidden)?;
+            let refused = near.cursor();
+            arrived.next().expect("offset 3").failed()?;
+            let failed = near.cursor();
+            let again = next_arrival(near.receive()?, "offset 3 again")?.taken()?;
+            Ok::<_, TransportError>((one, [refused, failed, near.cursor()], again))
         });
         // One broker, so one connection for both sends; the receive opens
         // its own.
@@ -425,14 +438,28 @@ mod tests {
         let mut session = far_end
             .accept_one(&listener)
             .expect("third")
-            .with_records("orders", &[b"zero", b"one", b"two"]);
-        while session.next_event().expect("serving").is_some() {}
-        let (arrived, cursor) = near.join().expect("thread").expect("round trip");
-        assert_eq!(arrived.len(), 2, "from offset 1");
-        assert_eq!(arrived[0].bytes, b"one");
-        assert!(arrived[0].origin_uri.starts_with("redpanda://127.0.0.1:"));
-        assert!(arrived[1].origin_uri.ends_with("/orders/0?offset=2"));
-        assert_eq!(cursor, 3);
+            .with_records("orders", &[b"zero", b"one", b"two", b"three"]);
+        let mut fetched_from = Vec::new();
+        while let Some(event) = session.next_event().expect("serving") {
+            if let Event::Fetched { offset, .. } = event {
+                fetched_from.push(offset);
+            }
+        }
+        let (one, cursors, again) = near.join().expect("thread").expect("round trip");
+        assert_eq!(one.bytes, b"one");
+        assert!(one.origin_uri.starts_with("redpanda://127.0.0.1:"));
+        assert_eq!(
+            cursors,
+            [3, 3, 4],
+            "a refused offset 2 moves the cursor past it, a failed offset 3 leaves it"
+        );
+        assert_eq!(again.bytes, b"three");
+        assert!(again.origin_uri.ends_with("/orders/0?offset=3"));
+        assert_eq!(
+            fetched_from,
+            [1, 3],
+            "only the failed record is fetched again"
+        );
         assert!(far_end.claims().is_none());
         assert_eq!(far_end.name(), "redpanda");
     }
@@ -447,7 +474,12 @@ mod tests {
                 .timing_out_after(secs(2))
                 .with_admin(&admin_address)?;
             let refused = near.receive().expect_err("draining");
-            let arrived = near.receive()?;
+            let arrived = near
+                .receive()?
+                .into_iter()
+                .map(Arrived::taken)
+                .collect::<Result<Vec<_>>>()?;
+            assert_eq!(arrived[0].bytes, b"one");
             // Its kept connection closes with it, which ends the serving.
             drop(near);
             let unknown = RedpandaTransport::new("127.0.0.1:1", "orders")
@@ -486,7 +518,6 @@ mod tests {
         assert!(refused.retryable);
         assert!(refused.message.contains("in maintenance"));
         assert_eq!(arrived.len(), 1);
-        assert_eq!(arrived[0].bytes, b"one");
         assert!(!unknown.retryable);
     }
 
@@ -508,12 +539,18 @@ mod tests {
                 let began = std::time::Instant::now();
                 let mut arrived = 0;
                 for _ in 0..RECEIVES {
-                    arrived += near.receive()?.len();
+                    for record in near.receive()? {
+                        record.taken()?;
+                        arrived += 1;
+                    }
                 }
                 let took = began.elapsed();
                 // Generous for a debug build under load: a millisecond a fetch.
                 assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
-                arrived += near.receive()?.len();
+                for record in near.receive()? {
+                    record.taken()?;
+                    arrived += 1;
+                }
                 Ok::<_, transport::TransportError>(arrived)
             });
             // One connection for every fetch: one session accepted.
