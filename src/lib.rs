@@ -30,12 +30,13 @@ use std::time::Duration;
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
 pub use kafka::{Client, Event, Record, Session, TopicMetadata};
 use net::Target;
+use transport::ArrivalIdentity;
 use transport::contiguous::Contiguous;
 use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Pool, Transport};
+use transport::{Arrived, Configured, Directions, Headers, Pool, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 pub struct RedpandaTransport {
@@ -219,14 +220,18 @@ impl Transport for RedpandaTransport {
         let mut arrived = Vec::with_capacity(records.len());
         for record in records {
             let offset = record.offset;
-            arrived.push(Arrived::whole(
-                format!(
-                    "redpanda://{}/{}/{}?offset={offset}",
-                    self.broker, self.topic, self.partition
-                ),
-                record.value.unwrap_or_default(),
-                self.cursor.advancing(offset, offset + 1),
-            ));
+            arrived.push(
+                Arrived::whole(
+                    format!(
+                        "redpanda://{}/{}/{}?offset={offset}",
+                        self.broker, self.topic, self.partition
+                    ),
+                    record.value.unwrap_or_default(),
+                    self.cursor.advancing(offset, offset + 1),
+                )
+                .detected()
+                .with_headers(Headers::of("kafka").octets(record.headers)),
+            );
         }
         Ok(arrived)
     }
@@ -362,6 +367,12 @@ impl RedpandaTransport {
 }
 
 impl Loopback for RedpandaTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Unnamed(
+            "the broker delivers it: its headers say who sent it, the peer is the broker",
+        )
+    }
+
     /// On the wire it is Kafka, so the far end is that crate's: one
     /// producer, one record.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
