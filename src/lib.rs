@@ -202,6 +202,10 @@ impl Transport for RedpandaTransport {
         transport::Arrivals::Ordered("a cursor moves only contiguously")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("a fetch waits at the broker for a record, up to its wait")
+    }
+
     /// The records from the cursor on — once the Admin API, where
     /// consulted, says the node is taking work — fetched on the connection
     /// the first receive opened to the leader and kept. Nothing moves the
