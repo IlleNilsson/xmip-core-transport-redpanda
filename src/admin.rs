@@ -322,7 +322,7 @@ mod tests {
         assert_eq!(before[0].membership_status, "active");
         assert!(during[0].draining);
         assert_eq!(status[0].config_version, 1);
-        assert!(status[0].invalid.is_empty());
+        assert_eq!(status[0].invalid, [] as [String; 0]);
         assert!(!missing.expect_err("node 9").retryable);
     }
 
