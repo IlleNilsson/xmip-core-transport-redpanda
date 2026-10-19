@@ -214,7 +214,7 @@ impl Transport for RedpandaTransport {
     /// where the cursor stands at it, `Refused` the same way, as a log has no
     /// place to reject a record into and a refused one is not read again,
     /// `Failed` not at all, so the failed record is fetched again.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         self.check_ready()?;
         let records = self.fetchers.exchange(
             self.broker.as_str(),
@@ -222,7 +222,7 @@ impl Transport for RedpandaTransport {
             |client| client.fetch(&self.topic, self.partition, self.cursor()),
         )?;
         let mut arrived = Vec::with_capacity(records.len());
-        for record in records {
+        for record in records.into_iter().take(most) {
             let offset = record.offset;
             arrived.push(
                 Arrived::whole(
@@ -240,17 +240,18 @@ impl Transport for RedpandaTransport {
         Ok(arrived)
     }
 
-    /// Produce on the connection kept for the broker, connected on the
-    /// first send to it, acknowledged by the leader.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        self.produce(target, bytes, None)
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("a record batch carries its CRC-32C over the whole of it")
     }
 
+    /// Produce on the connection kept for the broker, connected on the
+    /// first send to it, acknowledged by the leader.
     /// The key is the record's key, as the kafka technology puts it: what
     /// a consumer recognises a repeat by, and what a compacted topic keeps
     /// one record of.
-    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
-        self.produce(target, bytes, Some(key))
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
+        self.produce(target, bytes, outgoing.key())
     }
 }
 
