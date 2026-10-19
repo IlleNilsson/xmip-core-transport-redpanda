@@ -15,8 +15,8 @@ fn a_keyed_record_carries_the_journey_id_as_its_key_on_every_attempt() {
     let (listener, address) = RedpandaTransport::loopback().bind().expect("bound");
     let sender = thread::spawn(move || {
         let near = RedpandaTransport::new(address, "probe");
-        near.send_keyed("probe", b"order", KEY)?;
-        near.send_keyed("probe", b"order", KEY)?;
+        near.send_from("probe", transport::Outgoing::held(b"order").keyed(KEY))?;
+        near.send_from("probe", transport::Outgoing::held(b"order").keyed(KEY))?;
         near.send("probe", b"order")
     });
     let mut session = Session::accept(&listener, Some(LOOPBACK_TIMEOUT)).expect("accepted");
