@@ -247,7 +247,7 @@ impl Transport for RedpandaTransport {
     /// Produce on the connection kept for the broker, connected on the
     /// first send to it, acknowledged by the leader.
     /// The key is the record's key, as the kafka technology puts it: what
-    /// a consumer recognises a repeat by, and what a compacted topic keeps
+    /// a consumer recognizes a repeat by, and what a compacted topic keeps
     /// one record of.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
