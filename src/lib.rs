@@ -181,7 +181,7 @@ impl RedpandaTransport {
     /// Where a target names the broker and topic itself, or is a topic
     /// alone on this transport's broker.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match Target::naming_server(&["redpanda"], target) {
+        match Target::naming_server(Self::SCHEMES, target) {
             Some(named) if named.path().is_empty() => (named.authority(), &self.topic),
             Some(named) => (named.authority(), named.path()),
             None => (&self.broker, target),
@@ -336,6 +336,8 @@ impl Configured for RedpandaTransport {
             },
         ],
     };
+
+    const SCHEMES: &'static [&'static str] = &["redpanda"];
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let mut transport = Self::new(address, settings.text("topic"));
