@@ -15,7 +15,7 @@ A send target is read by `net::Target` in [xmip-core-library-net](https://github
 
 ## The deduplication key
 
-A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the record's key, as the kafka technology does, the same on every attempt of one Journey: what a consumer recognizes a repeat by and what a compacted topic keeps one record of, Redpanda appending a repeated record as Kafka does. An unkeyed `send` writes a null key.
+A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the record's key, as the kafka technology does, the same on every attempt on one Journey: what a consumer recognizes a repeat by and what a compacted topic keeps one record of, Redpanda appending a repeated record as Kafka does. An unkeyed `send` writes a null key.
 
 ## Toolchain
 

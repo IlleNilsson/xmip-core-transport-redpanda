@@ -1,5 +1,5 @@
 //! A keyed send carries its deduplication key as the record's key, the
-//! same on every attempt of one Journey; an unkeyed send carries none.
+//! same on every attempt on one Journey; an unkeyed send carries none.
 
 use std::thread;
 
