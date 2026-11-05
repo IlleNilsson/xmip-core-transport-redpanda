@@ -8,7 +8,7 @@
 //! brokers and whether each is alive or draining, the cluster
 //! configuration's status, and putting a broker into or out of maintenance.
 //! The far end, [`AdminSession`], answers those three from memory so a test
-//! and the playground can stand in for a broker.
+//! and the essentials can stand in for a broker.
 
 use std::net::TcpListener;
 use std::time::Duration;
