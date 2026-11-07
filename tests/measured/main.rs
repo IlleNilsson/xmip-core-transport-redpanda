@@ -8,6 +8,7 @@
 //!
 //! - a thousand fetches on one connection take a millisecond each at most.
 
+use std::assert_matches;
 use std::time::{Duration, Instant};
 
 use transport::Transport;
@@ -44,7 +45,7 @@ fn a_thousand_fetches_take_a_millisecond_each_at_most() {
             .with_records("orders", &[b"zero"]);
         for _ in 0..RECEIVES {
             let event = session.next_event().expect("fetch");
-            assert!(matches!(event, Some(Event::Fetched { .. })), "{event:?}");
+            assert_matches!(event, Some(Event::Fetched { .. }), "{event:?}");
         }
         assert_eq!(receiver.join().expect("thread").expect("fetched"), 1);
     });
