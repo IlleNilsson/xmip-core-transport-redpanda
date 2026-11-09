@@ -28,15 +28,14 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
-pub use kafka::{Client, Event, Record, Session, TopicMetadata};
+pub use kafka::{Client, Event, Reading, Record, Session, TopicMetadata};
 use net::Target;
 use transport::ArrivalIdentity;
-use transport::contiguous::Contiguous;
 use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Headers, Pool, Transport};
+use transport::{Arrived, Configured, Directions, Pool, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 pub struct RedpandaTransport {
@@ -46,9 +45,9 @@ pub struct RedpandaTransport {
     admin: Option<Admin>,
     node: i64,
     client: String,
-    /// The offset the next receive reads from, which a record's
-    /// acknowledgement moves.
-    cursor: Contiguous<i64>,
+    /// The cursor a record's acknowledgement moves and the mark of what was
+    /// handed up, as kafka's ([`Reading`]).
+    reading: Reading,
     timeout: Option<Duration>,
     /// The connections a send produces on, connected once per broker and
     /// kept.
@@ -70,7 +69,7 @@ impl RedpandaTransport {
             admin: None,
             node: 0,
             client: "xmip".to_string(),
-            cursor: Contiguous::new(0),
+            reading: Reading::new(0),
             timeout: None,
             producers: Pool::new(),
             fetchers: Pool::new(),
@@ -104,7 +103,7 @@ impl RedpandaTransport {
     /// Start reading from this offset rather than the beginning.
     #[must_use]
     pub fn from_offset(self, offset: i64) -> Self {
-        self.cursor.set(offset);
+        self.reading.set(offset);
         self
     }
 
@@ -118,7 +117,7 @@ impl RedpandaTransport {
     /// The offset the next receive reads from.
     #[must_use]
     pub fn cursor(&self) -> i64 {
-        self.cursor.at()
+        self.reading.cursor()
     }
 
     /// Connect to the partition's leader, asking the configured broker who
@@ -206,38 +205,26 @@ impl Transport for RedpandaTransport {
         transport::Waiting::Waits("a fetch waits at the broker for a record, up to its wait")
     }
 
-    /// The records from the cursor on — once the Admin API, where
-    /// consulted, says the node is taking work — fetched on the connection
-    /// the first receive opened to the leader and kept. Nothing moves the
-    /// cursor here: a record's acknowledgement does
-    /// ([`transport::contiguous::Contiguous`]) — `Accepted` past that record
-    /// where the cursor stands at it, `Refused` the same way, as a log has no
-    /// place to reject a record into and a refused one is not read again,
-    /// `Failed` not at all, so the failed record is fetched again.
+    /// The records past those already handed up — once the Admin API,
+    /// where consulted, says the node is taking work — fetched on the
+    /// connection the first receive opened to the leader and kept, each
+    /// handed up once by kafka's [`Reading`]: a record below the offset
+    /// asked for, which a Fetch returns with the rest of its batch, is
+    /// skipped; `Accepted` and `Refused` move the cursor past the record,
+    /// `Failed` leaves it and the failed record is fetched again.
     fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         self.check_ready()?;
+        let from = self.reading.next();
         let records = self.fetchers.exchange(
             self.broker.as_str(),
             || self.connect(),
-            |client| client.fetch(&self.topic, self.partition, self.cursor()),
+            |client| client.fetch(&self.topic, self.partition, from),
         )?;
-        let mut arrived = Vec::with_capacity(records.len());
-        for record in records.into_iter().take(most) {
-            let offset = record.offset;
-            arrived.push(
-                Arrived::whole(
-                    format!(
-                        "redpanda://{}/{}/{}?offset={offset}",
-                        self.broker, self.topic, self.partition
-                    ),
-                    record.value.unwrap_or_default(),
-                    self.cursor.advancing(offset, offset + 1),
-                )
-                .detected()
-                .with_headers(Headers::of("kafka").octets(record.headers)),
-            );
-        }
-        Ok(arrived)
+        let origin = format!(
+            "redpanda://{}/{}/{}",
+            self.broker, self.topic, self.partition
+        );
+        Ok(self.reading.hand_up(from, records, most, &origin))
     }
 
     fn sending(&self) -> transport::Sending {
@@ -245,7 +232,7 @@ impl Transport for RedpandaTransport {
     }
 
     /// Produce on the connection kept for the broker, connected on the
-    /// first send to it, acknowledged by the leader.
+    /// first send to it, acknowledged by all in-sync replicas.
     /// The key is the record's key, as the kafka technology puts it: what
     /// a consumer recognizes a repeat by, and what a compacted topic keeps
     /// one record of.
@@ -390,7 +377,7 @@ impl Loopback for RedpandaTransport {
     }
 
     /// A fresh producer to `address`, one record on this transport's topic,
-    /// acknowledged by the leader before it returns.
+    /// acknowledged by all in-sync replicas before it returns.
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
         let mut near = Self::new(address, &self.topic).on_partition(self.partition);
         near.timeout = self.timeout;
