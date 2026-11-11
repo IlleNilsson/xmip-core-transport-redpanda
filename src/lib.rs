@@ -31,6 +31,7 @@ pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
 pub use kafka::{Client, Event, Reading, Record, Session, TopicMetadata};
 use net::Target;
 use transport::ArrivalIdentity;
+use transport::destination;
 use transport::error::{Result, TransportError};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -178,13 +179,11 @@ impl RedpandaTransport {
     }
 
     /// Where a target names the broker and topic itself, or is a topic
-    /// alone on this transport's broker.
+    /// alone on this transport's broker, or empty and this transport's
+    /// topic (`transport::destination::on_server`).
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match Target::naming_server(Self::SCHEMES, target) {
-            Some(named) if named.path().is_empty() => (named.authority(), &self.topic),
-            Some(named) => (named.authority(), named.path()),
-            None => (&self.broker, target),
-        }
+        let named = Target::naming_server(Self::SCHEMES, target);
+        destination::on_server(target, named, (&self.broker, &self.topic))
     }
 }
 
@@ -326,6 +325,11 @@ impl Configured for RedpandaTransport {
 
     const SCHEMES: &'static [&'static str] = &["redpanda"];
 
+    /// The topic setting: the address names only the broker.
+    fn own_target(_address: &str) -> &str {
+        destination::OWN
+    }
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let mut transport = Self::new(address, settings.text("topic"));
         if let Some(partition) = settings.optional_integer("partition") {
@@ -424,6 +428,33 @@ mod tests {
             panic!("the topic is required");
         };
         assert!(refused.message.contains("\"topic\""), "{refused}");
+    }
+
+    #[test]
+    fn a_send_location_produces_to_its_topic_and_a_target_naming_another_wins() {
+        use xcore::settings::Given;
+        let far_end = RedpandaTransport::new("127.0.0.1:0", "orders").timing_out_after(secs(2));
+        let (listener, address) = far_end.bind().expect("binding");
+        let location = format!("redpanda://{address}");
+        let near = std::thread::spawn(move || {
+            let given = [
+                ("topic".to_string(), Given::Text("orders".to_string())),
+                ("timeout".to_string(), Given::Text("2s".to_string())),
+            ];
+            let near = RedpandaTransport::open(&location, Applies::Send, &given)?;
+            near.send(RedpandaTransport::own_target(&location), b"own")?;
+            near.send("invoices", b"other")
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        let own = session.next_produce().expect("own").expect("a record");
+        assert!(own.origin_uri.contains("/orders/0?"), "{}", own.origin_uri);
+        let other = session.next_produce().expect("other").expect("a record");
+        assert!(
+            other.origin_uri.contains("/invoices/0?"),
+            "{}",
+            other.origin_uri
+        );
+        near.join().expect("thread").expect("producing");
     }
 
     #[test]

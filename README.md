@@ -13,6 +13,8 @@ A fetched record is handed up once and acknowledged after the runtime's whole re
 
 A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls: scheme, authority, path and decoded query. Until 2026-09-28 it was read through the transport capability's `socket::target`, which split it on its first slash and left the query in the path.
 
+A Send Location produces to the topic its `topic` setting names, on the broker its address names: it sends to the empty target (`Configured::own_target`, `transport::destination::OWN`), which `transport::destination::on_server` reads as that topic. A target naming another still wins — `invoices`, or `redpanda://host:9092/invoices` (ADR-0064, amendment 2026-11-10).
+
 ## The deduplication key
 
 A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the record's key, as the kafka technology does, the same on every attempt on one Journey: what a consumer recognizes a repeat by and what a compacted topic keeps one record of, Redpanda appending a repeated record as Kafka does. An unkeyed `send` writes a null key.
