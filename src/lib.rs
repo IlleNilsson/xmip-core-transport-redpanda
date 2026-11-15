@@ -78,12 +78,12 @@ impl RedpandaTransport {
     }
 
     /// Consult the Admin API at `address`, `host:9644`, before receiving,
-    /// on connections kept to it. The timeout is the one set before.
+    /// on connections kept to it, asked within `timeout`.
     ///
     /// # Errors
     /// Where `address` is not a host and port.
-    fn with_admin(mut self, address: &str) -> Result<Self> {
-        self.admin = Some(Admin::new(address, self.timeout)?);
+    fn with_admin(mut self, address: &str, timeout: Option<Duration>) -> Result<Self> {
+        self.admin = Some(Admin::new(address, timeout)?);
         Ok(self)
     }
 
@@ -105,13 +105,6 @@ impl RedpandaTransport {
     #[must_use]
     pub fn from_offset(self, offset: i64) -> Self {
         self.reading.set(offset);
-        self
-    }
-
-    /// Give up on a broker that stops mid-message.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
         self
     }
 
@@ -312,14 +305,12 @@ impl Configured for RedpandaTransport {
                           out.",
                 applies: Applies::Receive,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a broker that stops mid-message is waited on; unbounded when \
-                          left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a broker that stops mid-message is waited on; unbounded when \
+                 left out.",
+            ),
         ],
     };
 
@@ -328,6 +319,10 @@ impl Configured for RedpandaTransport {
     /// The topic setting: the address names only the broker.
     fn own_target(_address: &str) -> &str {
         destination::OWN
+    }
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
     }
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
@@ -343,12 +338,11 @@ impl Configured for RedpandaTransport {
         if let Some(node) = settings.optional_integer("node") {
             transport = transport.on_node(node);
         }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
-        }
-        // After the timeout, which the Admin API is asked within.
+        // The Admin API is asked within the Location's timeout, which `open`
+        // hands the transport itself once it is built.
         if let Some(admin) = settings.optional_text("admin") {
-            transport = transport.with_admin(admin)?;
+            let timeout = settings.optional_duration(transport::configured::TIMEOUT);
+            transport = transport.with_admin(admin, timeout)?;
         }
         Ok(transport)
     }
@@ -524,7 +518,7 @@ mod tests {
         let near = std::thread::spawn(move || {
             let near = RedpandaTransport::new(address, "orders")
                 .timing_out_after(secs(2))
-                .with_admin(&admin_address)?;
+                .with_admin(&admin_address, Some(secs(2)))?;
             let refused = near.receive().expect_err("draining");
             let arrived = near
                 .receive()?
@@ -537,7 +531,7 @@ mod tests {
             let unknown = RedpandaTransport::new("127.0.0.1:1", "orders")
                 .on_node(7)
                 .timing_out_after(secs(2))
-                .with_admin(&admin_address)?
+                .with_admin(&admin_address, Some(secs(2)))?
                 .check_ready()
                 .expect_err("no node 7");
             Ok::<_, TransportError>((refused, arrived, unknown))
