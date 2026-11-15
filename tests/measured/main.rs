@@ -6,13 +6,20 @@
 //! (`cargo test --test measured --all-features -- --test-threads=1`), so
 //! what is measured is Xmip's work and not its neighbors':
 //!
-//! - a thousand fetches on one connection take a millisecond each at most.
+//! - a thousand fetches on one connection take a millisecond each at most
+//!   beyond their wakes, round by round beside a plain wake, the fastest of
+//!   five (`xcore::latency::Rounds`).
 
 use std::assert_matches;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use transport::Transport;
+use xcore::latency::Rounds;
 use xmip_core_transport_redpanda::{Event, RedpandaTransport};
+
+/// What a fetch wakes where a plain wake wakes one: the far end at the
+/// request, and this end at its answer.
+const WAKES: u32 = 2;
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -26,18 +33,18 @@ fn a_thousand_fetches_take_a_millisecond_each_at_most() {
     let near = RedpandaTransport::new(address, "orders").timing_out_after(secs(5));
     std::thread::scope(|scope| {
         let receiver = scope.spawn(|| {
-            let began = Instant::now();
-            let mut arrived = 0;
+            let (mut rounds, mut arrived) = (Rounds::crossing(WAKES), 0);
             for _ in 0..RECEIVES {
-                for record in near.receive()? {
-                    record.taken()?;
-                    arrived += 1;
-                }
+                arrived += rounds.round(|| {
+                    let mut taken = 0;
+                    for record in near.receive()? {
+                        record.taken()?;
+                        taken += 1;
+                    }
+                    Ok::<_, transport::TransportError>(taken)
+                })?;
             }
-            let took = began.elapsed();
-            // Generous for a debug build under load: a millisecond a fetch.
-            assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
-            Ok::<_, transport::TransportError>(arrived)
+            Ok::<_, transport::TransportError>((rounds, arrived))
         });
         let mut session = far_end
             .accept_one(&listener)
@@ -47,6 +54,8 @@ fn a_thousand_fetches_take_a_millisecond_each_at_most() {
             let event = session.next_event().expect("fetch");
             assert_matches!(event, Some(Event::Fetched { .. }), "{event:?}");
         }
-        assert_eq!(receiver.join().expect("thread").expect("fetched"), 1);
+        let (rounds, arrived) = receiver.join().expect("thread").expect("fetched");
+        assert_eq!(arrived, 1);
+        rounds.hold("a fetch");
     });
 }
