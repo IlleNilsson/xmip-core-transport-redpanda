@@ -13,6 +13,7 @@
 use std::assert_matches;
 use std::time::Duration;
 
+use transport::Configured;
 use transport::Transport;
 use xcore::latency::Rounds;
 use xmip_core_transport_redpanda::{Event, RedpandaTransport};
