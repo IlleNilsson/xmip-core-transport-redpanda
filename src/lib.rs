@@ -346,6 +346,13 @@ impl Configured for RedpandaTransport {
         }
         Ok(transport)
     }
+
+    /// The Admin API's connections, an HTTP/2 one's frames in a span
+    /// counted on `clock`, its node's (ADR-0068, amendment 2026-11-16).
+    fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
+        self.admin = self.admin.map(|admin| admin.timed_by(clock));
+        self
+    }
 }
 
 impl RedpandaTransport {

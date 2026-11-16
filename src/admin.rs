@@ -11,6 +11,7 @@
 //! and the essentials can stand in for a broker.
 
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::endpoint::{Connections, Offer};
@@ -19,6 +20,7 @@ use net::http::{Request, Response};
 use serde_json::{Value, json};
 use transport::error::{Result, protocol_error};
 use transport::socket;
+use xcore::Clock;
 
 /// One broker as `GET /v1/brokers` describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +64,13 @@ impl Admin {
             timeout,
             connections: Connections::new(),
         })
+    }
+
+    /// The same, its connections' spans counted on `clock`, the node's.
+    #[must_use]
+    pub fn timed_by(mut self, clock: &Arc<dyn Clock>) -> Self {
+        self.connections = self.connections.timed_by(clock);
+        self
     }
 
     /// The API's address, `host:9644`.
