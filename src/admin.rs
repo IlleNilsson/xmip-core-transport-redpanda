@@ -120,15 +120,12 @@ impl Admin {
                 node_id: n["node_id"].as_i64().unwrap_or(-1),
                 restart: n["restart"].as_bool().unwrap_or(false),
                 config_version: n["config_version"].as_i64().unwrap_or(0),
-                invalid: n["invalid"]
-                    .as_array()
-                    .map(|i| {
-                        i.iter()
-                            .filter_map(Value::as_str)
-                            .map(String::from)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                invalid: n["invalid"].as_array().map_or_default(|i| {
+                    i.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                }),
             })
             .collect())
     }
