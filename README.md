@@ -19,6 +19,10 @@ A Send Location produces to the topic its `topic` setting names, on the broker i
 
 A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the record's key, as the kafka technology does, the same on every attempt on one Journey: what a consumer recognizes a repeat by and what a compacted topic keeps one record of, Redpanda appending a repeated record as Kafka does. An unkeyed `send` writes a null key.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `topic`, `partition`, `offset`, `admin`, `node` and `timeout`, and `SCHEMES`, `redpanda`. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code and every crate the code is built on — the kafka technology it speaks Kafka through, the http technology the Admin API is asked on, and `serde_json` — are behind the default feature. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check a Redpanda Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

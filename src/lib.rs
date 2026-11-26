@@ -21,24 +21,41 @@
 //! `redpanda://broker/orders/0?offset=41`. A send target is
 //! `redpanda://host:9092/orders`, `host:9092/orders`, or a topic alone on
 //! the configured broker.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature, the kafka
+//! technology with it: what the surfaces' library carries (ADR-0064,
+//! amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod admin;
+#[cfg(feature = "declaration")]
+pub mod declaration;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use admin::{Admin, AdminRequest, AdminSession, Broker, ConfigStatus};
+#[cfg(feature = "default")]
 pub use kafka::{Client, Event, Reading, Record, Session, TopicMetadata};
+#[cfg(feature = "default")]
 use net::Target;
-use transport::ArrivalIdentity;
-use transport::destination;
+#[cfg(feature = "default")]
 use transport::error::{Result, TransportError};
-use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::socket;
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, destination, listening::Listening, socket};
+#[cfg(feature = "default")]
 use transport::{Arrived, Configured, Directions, Pool, Transport};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 pub struct RedpandaTransport {
     broker: String,
     topic: String,
@@ -58,6 +75,7 @@ pub struct RedpandaTransport {
     fetchers: Pool<Client>,
 }
 
+#[cfg(feature = "default")]
 impl RedpandaTransport {
     /// Speak to the broker at `broker` about `topic`, partition 0, reading
     /// from its beginning.
@@ -180,6 +198,7 @@ impl RedpandaTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for RedpandaTransport {
     fn name(&self) -> &'static str {
         "redpanda"
@@ -234,6 +253,7 @@ impl Transport for RedpandaTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl RedpandaTransport {
     /// The one send: one record on the target's topic, under `key` where
     /// there is one, on the connection kept for its broker.
@@ -251,70 +271,10 @@ impl RedpandaTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for RedpandaTransport {
-    /// The address is the broker, `host:9092`: where a Location connects
-    /// and asks for the partition's leader.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "topic",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The topic a Receive Location fetches and a Send Location produces to \
-                          when a target names no topic.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "partition",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 2_147_483_647,
-                },
-                presence: Presence::Optional,
-                meaning: "The partition read and written; partition 0 when left out.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "offset",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: i64::MAX,
-                },
-                presence: Presence::Optional,
-                meaning: "The offset a Receive Location starts fetching from; the partition's \
-                          beginning when left out.",
-                applies: Applies::Receive,
-            },
-            Setting {
-                name: "admin",
-                kind: Kind::Address,
-                presence: Presence::Optional,
-                meaning: "The Admin API, `host:9644`, consulted before a receive takes work; \
-                          not consulted when left out.",
-                applies: Applies::Receive,
-            },
-            Setting {
-                name: "node",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: i64::MAX,
-                },
-                presence: Presence::Optional,
-                meaning: "The node the broker is, as the Admin API numbers it; node 0 when left \
-                          out.",
-                applies: Applies::Receive,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a broker that stops mid-message is waited on; unbounded when \
-                 left out.",
-            ),
-        ],
-    };
-
-    const SCHEMES: &'static [&'static str] = &["redpanda"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The topic setting: the address names only the broker.
     fn own_target(_address: &str) -> &str {
@@ -355,6 +315,7 @@ impl Configured for RedpandaTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl RedpandaTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, one topic called `probe`. The Admin API is not consulted; a
@@ -365,6 +326,7 @@ impl RedpandaTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for RedpandaTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -397,6 +359,7 @@ mod tests {
     use transport::Refusal;
     use transport::arrived::next_arrival;
     use transport::payload::{edge_payloads, sized_payloads};
+    use xcore::settings::Applies;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)

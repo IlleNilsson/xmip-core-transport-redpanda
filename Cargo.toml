@@ -15,15 +15,27 @@ path = "src/lib.rs"
 # (repository-model.md). Redpanda speaks Kafka on the wire, so the client and
 # the far end come from the kafka technology; the Admin API is JSON over
 # HTTP, asked on the http technology's kept connections and judged by its
-# status rule, and serde_json reads it.
+# status rule, and serde_json reads it. Its declaration takes the
+# capability's `timeout` (`transport::configured::timeout`), and nothing of
+# the kafka technology's: Redpanda rides on Kafka in its code alone.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
 # The settings this technology declares (xcore::settings), read through
 # transport::Configured (ADR-0064, amendment 2026-09-26).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
-kafka = { package = "xmip-core-transport-kafka", git = "https://github.com/IlleNilsson/xmip-core-transport-kafka", branch = "main" }
-http = { package = "xmip-core-transport-http", git = "https://github.com/IlleNilsson/xmip-core-transport-http", branch = "main" }
-net ={ package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
-serde_json = "1"
+kafka = { package = "xmip-core-transport-kafka", git = "https://github.com/IlleNilsson/xmip-core-transport-kafka", branch = "main", optional = true }
+http = { package = "xmip-core-transport-http", git = "https://github.com/IlleNilsson/xmip-core-transport-http", branch = "main", optional = true }
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main", optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+# The technology: its code, everything it is built on, and its declaration.
+# Without it the crate is its declaration alone (ADR-0064, amendments
+# 2026-10-22 and 2026-11-26).
+default = ["declaration", "dep:kafka", "dep:http", "dep:net", "dep:serde_json"]
+# The declaration alone: what a Location of this technology is configured
+# with, `declaration::SETTINGS` and `SCHEMES`, and none of the code — what
+# the surfaces' library is to carry (open problem 48).
+declaration = []
 
 # The module's timing program (doc/governance/rust-style.md section 5c): a
 # plain cargo test leaves it out, and the landing runs it after every other
