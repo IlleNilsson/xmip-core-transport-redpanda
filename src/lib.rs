@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-//! Streams that arrive as Redpanda records. One record is one Stream, the
-//! topic, partition and offset kept beside it.
+//! Streams that arrive as Redpanda records, a record a Stream as in the
+//! kafka technology.
 //!
 //! Redpanda is a Kafka broker written to run on one binary without a
 //! coordinator, and on the wire it is Kafka: Metadata, Produce and Fetch on
@@ -23,10 +23,8 @@
 //! the configured broker.
 //!
 //! **Built with its `declaration` feature alone** the crate is
-//! [`declaration`], what a Location of it is configured with, and none of
-//! the code above, which is behind the default feature, the kafka
-//! technology with it: what the surfaces' library carries (ADR-0064,
-//! amendment 2026-11-26).
+//! [`declaration`]. The code is behind the default feature, the kafka
+//! technology with it.
 
 #[cfg(feature = "default")]
 pub mod admin;
@@ -67,11 +65,9 @@ pub struct RedpandaTransport {
     /// handed up, as kafka's ([`Reading`]).
     reading: Reading,
     timeout: Option<Duration>,
-    /// The connections a send produces on, connected once per broker and
-    /// kept.
+    /// The connections a send produces on, as kafka's.
     producers: Pool<Client>,
-    /// The connection a receive fetches on, to the partition's leader:
-    /// connected on the first receive and kept.
+    /// The connection a receive fetches on, as kafka's.
     fetchers: Pool<Client>,
 }
 
@@ -242,11 +238,7 @@ impl Transport for RedpandaTransport {
         transport::Sending::Gathered("a record batch carries its CRC-32C over the whole of it")
     }
 
-    /// Produce on the connection kept for the broker, connected on the
-    /// first send to it, acknowledged by all in-sync replicas.
-    /// The key is the record's key, as the kafka technology puts it: what
-    /// a consumer recognizes a repeat by, and what a compacted topic keeps
-    /// one record of.
+    /// Produce as kafka's send does, the record's key its key.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
         self.produce(target, bytes, outgoing.key())
@@ -255,8 +247,7 @@ impl Transport for RedpandaTransport {
 
 #[cfg(feature = "default")]
 impl RedpandaTransport {
-    /// The one send: one record on the target's topic, under `key` where
-    /// there is one, on the connection kept for its broker.
+    /// The one send, as kafka's.
     fn produce(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
         let (broker, topic) = self.resolve(target);
         self.producers.exchange(

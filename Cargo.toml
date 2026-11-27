@@ -28,13 +28,10 @@ net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson
 serde_json = { version = "1", optional = true }
 
 [features]
-# The technology: its code, everything it is built on, and its declaration.
-# Without it the crate is its declaration alone (ADR-0064, amendments
-# 2026-10-22 and 2026-11-26).
+# The code and its declaration: the transport guide's "The declaration",
+# module/core/capability/transport/doc/adding-a-transport.md.
 default = ["declaration", "dep:kafka", "dep:http", "dep:net", "dep:serde_json"]
-# The declaration alone: what a Location of this technology is configured
-# with, `declaration::SETTINGS` and `SCHEMES`, and none of the code — what
-# the surfaces' library is to carry (open problem 48).
+# The declaration alone.
 declaration = []
 
 # The module's timing program (doc/governance/rust-style.md section 5c): a
